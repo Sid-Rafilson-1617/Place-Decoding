@@ -395,7 +395,7 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
       the bin with the highest votes as the predicted location.
     - Computes error as the Euclidean distance between the predicted and actual positions.
     """
-
+    
     nx, ny = n_squares
     xmin, xmax, ymin, ymax = boundaries
     n_timesteps_pre = len(data_pre)
@@ -432,8 +432,6 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
             data_pos_test = data_pos_test_post
             indices_test = indices_test_post
 
-
-
         # Train classifiers for this fold
         clf_dict = {}
         bins_nodata = []
@@ -463,8 +461,6 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
                     bins_nodata.append(result[0])
                 else:
                     clf_dict[result[0]] = result[1]
-
-                    
 
         # Decode positions in batches
         def decode_batch(spks_batch, n_locations, clf_dict, bins_nodata):
@@ -506,124 +502,116 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
         return fold_error, predicted_positions
 
 
+def decoding_err_floorflip(data_pre, data_post, data_spks_pre, data_spks_post, n_squares, boundaries, kCV=10, shuffle=False, train_on='pre', test_on='post'):
+    
+    '''
+    Train a battery of pairwise classifiers to decode 2D spatial position from spiking
+    activity. This function trains on data from 1 floor condition and tests on data from
+    the other floor condition. The pre and post data are both split into kCV folds (default 10).
+    Instead of testing on the heald out fold from the pre data, the function tests on the corresponding fold from the post data.
 
-def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, bins_nodata, kCV, train_on, test_on):
+
+    Parameters
+    --
+    data_pre : Position data giving the 2D position at each observation before the floor flip.
+        2D array of size n_observations-by-2.
+
+    data_post : Position data giving the 2D position at each observation after the floor flip.
+        2D array of size n_observations-by-2.
+
+    data_spks_pre : Spiking data giving the spike count vector at each observation before the floor flip.
+        2D array of size n_observations-by-n_neurons.
+
+    data_spks_post : Spiking data giving the spike count vector at each observation after the floor flip.
+        2D array of size n_observations-by-n_neurons.
+
+    n_squares : 2D list giving the number of grid squares along the x and y directions.
+
+    boundaries: A list of four values (xmin, xmax, ymin, ymax) giving the boundaries
+        of the arena.
+
+    kCV : An integer specifying how many folds in k-fold cross-validation.
+
+    shuffle : If True, circularly shuffle the neural and behavior data as a control.
+
+    train_on : Specify whether to train on 'pre' or 'post' data.
+
+    test_on : Specify whether to test on 'pre' or 'post' data.
+
+    Returns
+    --
+    err_kfold : A list of length kCV, where each element corresponds to the median
+        decoding error (i.e. distance between the actual and estimated spatial positions)
+        from one of the training/testing splits.
+
+    predicted_position : predicted_position[i,:] is the 2D position predicted by the
+        decoder in bin i.
+    '''
 
 
+    # getting the 2D shape of the data and checking if they match
+    n_timesteps_pre, n_neurons_pre = np.shape(data_spks_pre)
+    n_timesteps_post, n_neurons_post = np.shape(data_spks_post)
+    if n_neurons_pre != n_neurons_post:
+        print('Number of neurons in pre and post data do not match.')
+        return None, None, None
+    
+    n_neurons = n_neurons_pre
+    print('n_neurons: ', n_neurons)
+
+   
+    # Shuffle the data if required
+    if shuffle:
+        roll_int_pre = np.random.randint(n_timesteps_pre // 10, n_timesteps_pre - n_timesteps_pre // 10)
+        data_pre = np.roll(data_pre[::-1], roll_int_pre)
+        roll_int_post = np.random.randint(n_timesteps_post // 10, n_timesteps_post - n_timesteps_post // 10)
+        data_post = np.roll(data_post[::-1], roll_int_post)
+
+
+    # Assign bins to positions
     nx, ny = n_squares
     xmin, xmax, ymin, ymax = boundaries
-    n_timesteps_pre = len(data_pre)
-    n_timesteps_post = len(data_post)
+    dx = (xmax-xmin)/nx
+    dy = (ymax-ymin)/ny
+
+    bin_numbers_pre = np.zeros(n_timesteps_pre)
+    for i in range(n_timesteps_pre):
+        x, y = data_pre[i,:]
+        mx = (x-xmin)//dx
+        my = (y-ymin)//dy
+        bin_numbers_pre[i] = int(nx*my + mx)
+
+    bin_numbers_post = np.zeros(n_timesteps_post)
+    for i in range(n_timesteps_post):
+        x, y = data_post[i,:]
+        mx = (x-xmin)//dx
+        my = (y-ymin)//dy
+        bin_numbers_post[i] = int(nx*my + mx)
+
+
+    # Split data into training and testing sets:
+    err_kfold = np.zeros(kCV)
+    predicted_position = np.zeros((len(bin_numbers_pre), 2))
 
     # 10-fold cross-validation
-    for kk in range(kCV):
-        # Split the pre and post data into training and testing sets
-        bin_numbers_train_pre, bin_numbers_test_pre = cv_split(bin_numbers_pre, kk, kCV)
-        data_spks_train_pre, data_spks_test_pre = cv_split(data_spks_pre, kk, kCV)
-        data_pos_train_pre, data_pos_test_pre = cv_split(data_pre, kk, kCV)
-        _, indices_test_pre = cv_split(np.arange(n_timesteps_pre), kk, kCV)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_fold = {
+            executor.submit(process_fold_floorflip, kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, [], kCV, train_on, test_on): kk
+            for kk in range(kCV)
+        }
 
-        bin_numbers_train_post, bin_numbers_test_post = cv_split(bin_numbers_post, kk, kCV)
-        data_spks_train_post, data_spks_test_post = cv_split(data_spks_post, kk, kCV)
-        data_pos_train_post, data_pos_test_post = cv_split(data_post, kk, kCV)
-        _, indices_test_post = cv_split(np.arange(n_timesteps_post), kk, kCV)
-
-
-
-        # Select training and testing data based on train_on and test_on parameters
-        if train_on == 'pre':
-            bin_numbers_train = bin_numbers_train_pre
-            data_spks_train = data_spks_train_pre
-        elif train_on == 'post':
-            bin_numbers_train = bin_numbers_train_post
-            data_spks_train = data_spks_train_post
-        else:
-            print('Invalid train_on value. Must be "pre" or "post".')
-            return None, None, None
-        
-        # Select testing data based on test_on parameter
-        if test_on == 'pre': 
-            data_spks_test = data_spks_test_pre
-            data_pos_test = data_pos_test_pre
-            indices_test = indices_test_pre
-        elif test_on == 'post':
-            data_spks_test = data_spks_test_post
-            data_pos_test = data_pos_test_post
-            indices_test = indices_test_post
-        else:
-            print('Invalid test_on value. Must be "pre" or "post".')
-            return None, None, None
-        
+        for future in concurrent.futures.as_completed(future_to_fold):
+            kk = future_to_fold[future]
+            fold_error, fold_predicted_position = future.result()
+            err_kfold[kk] = fold_error
+            predicted_position += fold_predicted_position
 
 
-        # Train the classifiers for this fold
-        clf_dict = {}
-        bins_nodata = []
-
-        def train_pairwise_classifier(i, j):
-            bins_i_train = bin_numbers_train[bin_numbers_train == i]
-            spks_i_train = data_spks_train[bin_numbers_train == i, :]
-            bins_j_train = bin_numbers_train[bin_numbers_train == j]
-            spks_j_train = data_spks_train[bin_numbers_train == j, :]
-            
-            if len(bins_i_train) == 0:
-                return (i, None)
-            elif len(bins_j_train) == 0:
-                return (j, None)
-            else:
-                X_train = np.vstack((spks_i_train, spks_j_train))
-                y_train = np.concatenate((np.ones_like(bins_i_train), np.zeros_like(bins_j_train)))
-                clf = svm.SVC(kernel='linear', class_weight='balanced', C=0.1)
-                clf.fit(X_train, y_train)
-                return ((i, j), clf)
-            
-        # Train classifiers
-        print(f'Fold {kk+1} - Training Classifiers')
-        for i in range(nx * ny):
-            for j in range(i + 1, nx * ny):
-                result = train_pairwise_classifier(i, j)
-                if result[1] is None:
-                    bins_nodata.append(result[0])
-                else:
-                    clf_dict[result[0]] = result[1]
-
-
-
-        # Decode the positions for the test data for this fold
-        def decode_position(k, spks):
-            local_votes = np.zeros(nx * ny)
-            for i in range(nx * ny):
-                for j in range(i + 1, nx * ny):
-                    if (i not in bins_nodata) and (j not in bins_nodata):
-                        clf = clf_dict[(i, j)]
-                        pred = clf.predict([spks])[0]
-                        local_votes[i] += pred
-                        local_votes[j] += 1 - pred
-            return k, local_votes
-        
-        # Decode all positions in the test set
-        print(f'Fold {kk+1} - Decoding Positions')
-        votes = np.zeros((len(data_spks_test), nx * ny))
-        for k, spks in enumerate(data_spks_test):
-            k, local_votes = decode_position(k, spks)
-            votes[k] = local_votes
-
-        # Predicted bins and positions
-        bin_pred = np.argmax(votes, axis=1)
-        pos_pred = np.zeros((len(bin_pred), 2))
-        err = np.zeros(len(bin_pred))
-
-        for i in range(len(bin_pred)):
-            pos_pred[i, 0] = xmin + (0.5 + bin_pred[i] % nx) * (xmax - xmin) / nx
-            pos_pred[i, 1] = ymin + (0.5 + bin_pred[i] // nx) * (ymax - ymin) / ny
-            err[i] = np.linalg.norm(data_pos_test[i, :] - pos_pred[i, :])
-
-        fold_error = np.median(err)
-        predicted_positions = np.zeros((len(bin_pred), 2))
-        predicted_positions[indices_test, :] = pos_pred
-
-        return fold_error, predicted_positions
+    print('Spatial decoding error: ', 
+        str(np.mean(err_kfold)) + ' +/- ' + str(np.std(err_kfold)))
     
+    return err_kfold, None, predicted_position
+
 
 
 #___________Decoding without floor flip______________________
