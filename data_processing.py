@@ -60,8 +60,7 @@ def cv_split(data, k, k_CV=2, n_blocks=10):
     return data_train, data_test
 
 
-def preprocess_data(path, bin_size=20, crop_hf=True, 
-                    flip_data=None, make_plots=False):
+def preprocess_data(path, bin_size=20, crop_hf=True, flip_data=None, make_plots=False):
     '''
     Get the data from a given file path and preprocess by binning spikes,
     tracking, and sniffing data.
@@ -169,8 +168,8 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
             speed[nans,i]= np.interp(x(nans), x(~nans), speed[~nans,i])
 
     # Preprocess the sniff data (if it exists):
-    if 'sniff_params' in os.listdir(path): 
-        sniff = loadmat(path + '/sniff_params')['sniff_params']  # sniff times in ms
+    if 'sniff_params.mat' in os.listdir(path): 
+        sniff = loadmat(path + '/sniff_params.mat')['sniff_params']  # sniff times in ms
         sniffs = sniff[:,0]
         #bad sniffs are sniffs where the third column is zero
         bad_sniffs = np.where(sniff[:,2] == 0)[0]
@@ -188,6 +187,11 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
         nans, x = nan_helper(sniff_freq_binned)
         if np.sum(nans) > 0:
             sniff_freq_binned[nans]= np.interp(x(nans), x(~nans), sniff_freq_binned[~nans])
+    else:
+        print('No sniff data for this session.')
+        sniff_freq_binned = None
+
+
 
     if 'events.mat' in os.listdir(path): 
         events = loadmat(path + '/events.mat')['events']
@@ -202,16 +206,21 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
 
         # Create a mask to handle head-fixed to freely moving transitions and floor flips:
         mask = np.array([True for ii in range(n_frames)])
+        color_mask = np.array([0 for ii in range(n_frames)]) # for plotting purposes. 0 for free movement, 1 for headfixed, and 2 for transitions
         if crop_hf:  # crop out the initial and final HF periods
             if frame_fm1!=0:
                 mask[:frame_fm2] = False
+                color_mask[:frame_fm2] = 1
             if frame_hf1!=0:
                 mask[frame_hf1:] = False
+                color_mask[frame_hf1:] = 1
         else:  # crop out just the transitions between FM and HF
             if frame_fm1!=0:
                 mask[frame_fm1:frame_fm2] = False
+                color_mask[frame_fm1:frame_fm2] = 2
             if frame_hf1!=0:
                 mask[frame_hf1:frame_hf2] = False
+                color_mask[frame_hf1:frame_hf2] = 2
         if frame_flip1!=0:  # keep data only from before or after the flip
             mask[frame_flip1:frame_flip2] = False
             if flip_data=='pre':  
@@ -219,15 +228,50 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
             elif flip_data=='post':
                 mask = np.array([f > frame_flip2 for f in range(n_frames)])*mask
             #elif flip_data is None:
-            #    mask = np.array([f < frame_flip1 or f > frame_flip2 for f in range(n_frames)])*mask
+                #mask = np.array([f < frame_flip1 or f > frame_flip2 for f in range(n_frames)])*mask
             
-            if False:
-                # Don't count spikes during floor flip (would mess up the binning below):
+
+
+
+            if False: ### I never used this !!!!
                 spiketimes = []
-                for t_s in spikes:
-                    if t_s < frame_times[frame_flip1] or t_s > frame_times[frame_flip2]:
-                        spiketimes.append(t_s)
-                spikes = np.array(spiketimes)
+                if frame_flip1 < len(frame_times) and frame_flip2 < len(frame_times):
+                    for t_s in spikes:
+                        if t_s < frame_times[frame_flip1] or t_s > frame_times[frame_flip2]:
+                            spiketimes.append(t_s)
+                    spikes = np.array(spike_times)
+                else:
+                    print(f"Warning: frame_flip1 ({frame_flip1}) or frame_flip2 ({frame_flip2}) is out of bounds for frame_times with size {len(frame_times)}")
+                    return None, None, None, None
+
+
+            # ensuring mask in long enough
+            if np.sum(mask) < 10_000:
+                print('Mask is small or empty after applying floor flip conditions.')
+                return None, None, None, None
+            
+        # plot the sniff frequencies color coded by the 3 conditions
+        if sniff_freq_binned is not None and make_plots:
+            plt.figure(figsize=(20,8))
+            plt.scatter(frame_times_ds[color_mask==0], sniff_freq_binned[color_mask==0], s=5, marker='.')
+            plt.scatter(frame_times_ds[color_mask==1], sniff_freq_binned[color_mask==1], s=5, marker='.')
+            plt.scatter(frame_times_ds[color_mask==2], sniff_freq_binned[color_mask==2], s=5, marker='.')
+
+            # draw two vertical lines to indicate the floor flip
+            if t_flip1 != 0 and t_flip2 != 0:
+                plt.axvline(x=t_flip1, color='k', linestyle='--')
+                plt.axvline(x=t_flip2, color='k', linestyle='--')
+                plt.title(f'Sniff frequency color coded by condition\nFloor flip times {t_flip1, t_flip2}')
+            else:
+                plt.title('Sniff frequency color coded by condition\nNo floor flip')
+            plt.xlabel('Time (ms)')
+            plt.ylabel('Sniff frequency (Hz)') 
+            plt.legend(['Free movement', 'Head fixed', 'Transitions', 'Floor flip'])
+            plt.tight_layout()
+            plt.savefig(path + '/sniff_frequency_color_coded.png')
+            plt.close()
+
+
 
         # Keep the data selected by the mask; 
         frame_times_ds = frame_times_ds[mask]
@@ -331,7 +375,6 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
             plt.savefig(path + '/data_FNO_F' + flip_data +'.pdf')
         else:
             plt.savefig(path + '/data_FNO_F.pdf')
-            plt.show()
 
     return spks, pos_ss, speed_ss, sniff_freq_ss
 
@@ -341,7 +384,7 @@ def preprocess_data(path, bin_size=20, crop_hf=True,
 
 #___________Decoding with floor flip______________________
 
-def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, bins_nodata, kCV, train_on, test_on):
+def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, bins_nodata, kCV, train_on, test_on, rotate):
 
     """
     Processes a single cross-validation fold for spatial decoding with a floor flip event, 
@@ -376,6 +419,8 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
         Specifies the phase of data ('pre' or 'post') to use for training.
     test_on : str
         Specifies the phase of data ('pre' or 'post') to use for testing.
+    rotate : bool
+        If True, rotates the spatial locations for decoding by 180 degrees.
 
     Returns:
     --------
@@ -403,106 +448,116 @@ def process_fold_floorflip(kk, data_pre, data_post, data_spks_pre, data_spks_pos
 
     batch_size = 1000  # Adjust as needed for memory
 
-    for kk in range(kCV):
-        # Split pre and post data into training and testing sets
-        bin_numbers_train_pre, _ = cv_split(bin_numbers_pre, kk, kCV)
-        data_spks_train_pre, data_spks_test_pre = cv_split(data_spks_pre, kk, kCV)
-        _, data_pos_test_pre = cv_split(data_pre, kk, kCV)
-        _, indices_test_pre = cv_split(np.arange(n_timesteps_pre), kk, kCV)
+ 
+    # Split pre and post data into training and testing sets
+    bin_numbers_train_pre, _ = cv_split(bin_numbers_pre, kk, kCV)
+    data_spks_train_pre, data_spks_test_pre = cv_split(data_spks_pre, kk, kCV)
+    _, data_pos_test_pre = cv_split(data_pre, kk, kCV)
+    _, indices_test_pre = cv_split(np.arange(n_timesteps_pre), kk, kCV)
 
-        bin_numbers_train_post, _ = cv_split(bin_numbers_post, kk, kCV)
-        data_spks_train_post, data_spks_test_post = cv_split(data_spks_post, kk, kCV)
-        _, data_pos_test_post = cv_split(data_post, kk, kCV)
-        _, indices_test_post = cv_split(np.arange(n_timesteps_post), kk, kCV)
+    bin_numbers_train_post, _ = cv_split(bin_numbers_post, kk, kCV)
+    data_spks_train_post, data_spks_test_post = cv_split(data_spks_post, kk, kCV)
+    _, data_pos_test_post = cv_split(data_post, kk, kCV)
+    _, indices_test_post = cv_split(np.arange(n_timesteps_post), kk, kCV)
 
-        # Select training and testing data
-        if train_on == 'pre':
-            bin_numbers_train = bin_numbers_train_pre
-            data_spks_train = data_spks_train_pre
-        elif train_on == 'post':
-            bin_numbers_train = bin_numbers_train_post
-            data_spks_train = data_spks_train_post
+    # Select training and testing data
+    if train_on == 'pre':
+        bin_numbers_train = bin_numbers_train_pre
+        data_spks_train = data_spks_train_pre
+    elif train_on == 'post':
+        bin_numbers_train = bin_numbers_train_post
+        data_spks_train = data_spks_train_post
 
-        if test_on == 'pre': 
-            data_spks_test = data_spks_test_pre
-            data_pos_test = data_pos_test_pre
-            indices_test = indices_test_pre
-        elif test_on == 'post':
-            data_spks_test = data_spks_test_post
-            data_pos_test = data_pos_test_post
-            indices_test = indices_test_post
+    if test_on == 'pre': 
+        data_spks_test = data_spks_test_pre
+        data_pos_test = data_pos_test_pre
+        indices_test = indices_test_pre
+    elif test_on == 'post':
+        data_spks_test = data_spks_test_post
+        data_pos_test = data_pos_test_post
+        indices_test = indices_test_post
 
-        # Train classifiers for this fold
-        clf_dict = {}
-        bins_nodata = []
+    # Rotate spatial location if required
+    if rotate:
+        midline_x = (xmax + xmin) / 2
+        midline_y = (ymax + ymin) / 2
+        data_pos_test[:, 0] = 2 * midline_x - data_pos_test[:, 0]
+        data_pos_test[:, 1] = 2 * midline_y - data_pos_test[:, 1]
 
-        def train_pairwise_classifier(i, j):
-            bins_i_train = bin_numbers_train[bin_numbers_train == i]
-            spks_i_train = data_spks_train[bin_numbers_train == i, :]
-            bins_j_train = bin_numbers_train[bin_numbers_train == j]
-            spks_j_train = data_spks_train[bin_numbers_train == j, :]
+    
 
-            if len(bins_i_train) == 0:
-                return (i, None)
-            elif len(bins_j_train) == 0:
-                return (j, None)
+
+    # Train classifiers for this fold
+    clf_dict = {}
+    bins_nodata = []
+
+    def train_pairwise_classifier(i, j):
+        bins_i_train = bin_numbers_train[bin_numbers_train == i]
+        spks_i_train = data_spks_train[bin_numbers_train == i, :]
+        bins_j_train = bin_numbers_train[bin_numbers_train == j]
+        spks_j_train = data_spks_train[bin_numbers_train == j, :]
+
+        if len(bins_i_train) == 0:
+            return (i, None)
+        elif len(bins_j_train) == 0:
+            return (j, None)
+        else:
+            X_train = np.vstack((spks_i_train, spks_j_train))
+            y_train = np.concatenate((np.ones_like(bins_i_train), np.zeros_like(bins_j_train)))
+            clf = svm.SVC(kernel='linear', class_weight='balanced', C=0.1)
+            clf.fit(X_train, y_train)
+            return ((i, j), clf)
+
+    # Train classifiers
+    for i in range(nx * ny):
+        for j in range(i + 1, nx * ny):
+            result = train_pairwise_classifier(i, j)
+            if result[1] is None:
+                bins_nodata.append(result[0])
             else:
-                X_train = np.vstack((spks_i_train, spks_j_train))
-                y_train = np.concatenate((np.ones_like(bins_i_train), np.zeros_like(bins_j_train)))
-                clf = svm.SVC(kernel='linear', class_weight='balanced', C=0.1)
-                clf.fit(X_train, y_train)
-                return ((i, j), clf)
+                clf_dict[result[0]] = result[1]
 
-        # Train classifiers
-        for i in range(nx * ny):
-            for j in range(i + 1, nx * ny):
-                result = train_pairwise_classifier(i, j)
-                if result[1] is None:
-                    bins_nodata.append(result[0])
-                else:
-                    clf_dict[result[0]] = result[1]
+    # Decode positions in batches
+    def decode_batch(spks_batch, n_locations, clf_dict, bins_nodata):
+        batch_size = len(spks_batch)
+        batch_votes = np.zeros((batch_size, n_locations))
 
-        # Decode positions in batches
-        def decode_batch(spks_batch, n_locations, clf_dict, bins_nodata):
-            batch_size = len(spks_batch)
-            batch_votes = np.zeros((batch_size, n_locations))
+        for i in range(n_locations):
+            for j in range(i + 1, n_locations):
+                if (i not in bins_nodata) and (j not in bins_nodata):
+                    clf = clf_dict.get((i, j), None)
+                    if clf:
+                        preds = clf.predict(spks_batch)
+                        batch_votes[:, i] += preds
+                        batch_votes[:, j] += 1 - preds
+        return batch_votes
 
-            for i in range(n_locations):
-                for j in range(i + 1, n_locations):
-                    if (i not in bins_nodata) and (j not in bins_nodata):
-                        clf = clf_dict.get((i, j), None)
-                        if clf:
-                            preds = clf.predict(spks_batch)
-                            batch_votes[:, i] += preds
-                            batch_votes[:, j] += 1 - preds
-            return batch_votes
+    # Decode all positions in the test set
+    votes = np.zeros((len(data_spks_test), nx * ny))
 
-        # Decode all positions in the test set
-        votes = np.zeros((len(data_spks_test), nx * ny))
+    for batch_start in range(0, len(data_spks_test), batch_size):
+        spks_batch = data_spks_test[batch_start:batch_start + batch_size]
+        batch_votes = decode_batch(spks_batch, nx * ny, clf_dict, bins_nodata)
+        votes[batch_start:batch_start + batch_size, :] = batch_votes
 
-        for batch_start in range(0, len(data_spks_test), batch_size):
-            spks_batch = data_spks_test[batch_start:batch_start + batch_size]
-            batch_votes = decode_batch(spks_batch, nx * ny, clf_dict, bins_nodata)
-            votes[batch_start:batch_start + batch_size, :] = batch_votes
+    # Predicted bins and positions
+    bin_pred = np.argmax(votes, axis=1)
+    pos_pred = np.zeros((len(bin_pred), 2))
+    err = np.zeros(len(bin_pred))
 
-        # Predicted bins and positions
-        bin_pred = np.argmax(votes, axis=1)
-        pos_pred = np.zeros((len(bin_pred), 2))
-        err = np.zeros(len(bin_pred))
+    for i in range(len(bin_pred)):
+        pos_pred[i, 0] = xmin + (0.5 + bin_pred[i] % nx) * (xmax - xmin) / nx
+        pos_pred[i, 1] = ymin + (0.5 + bin_pred[i] // nx) * (ymax - ymin) / ny
+        err[i] = np.linalg.norm(data_pos_test[i, :] - pos_pred[i, :])
 
-        for i in range(len(bin_pred)):
-            pos_pred[i, 0] = xmin + (0.5 + bin_pred[i] % nx) * (xmax - xmin) / nx
-            pos_pred[i, 1] = ymin + (0.5 + bin_pred[i] // nx) * (ymax - ymin) / ny
-            err[i] = np.linalg.norm(data_pos_test[i, :] - pos_pred[i, :])
+    fold_error = np.median(err)
+    predicted_positions = np.zeros((n_timesteps_pre if test_on == 'pre' else n_timesteps_post, 2))
+    predicted_positions[indices_test, :] = pos_pred
 
-        fold_error = np.median(err)
-        predicted_positions = np.zeros((n_timesteps_pre if test_on == 'pre' else n_timesteps_post, 2))
-        predicted_positions[indices_test, :] = pos_pred
-
-        return fold_error, predicted_positions
+    return fold_error, predicted_positions
 
 
-def decoding_err_floorflip(data_pre, data_post, data_spks_pre, data_spks_post, n_squares, boundaries, kCV=10, shuffle=False, train_on='pre', test_on='post'):
+def decoding_err_floorflip(data_pre, data_post, data_spks_pre, data_spks_post, n_squares, boundaries, kCV=10, shuffle=False, train_on='pre', test_on='post', rotate = False):
     
     '''
     Train a battery of pairwise classifiers to decode 2D spatial position from spiking
@@ -590,13 +645,21 @@ def decoding_err_floorflip(data_pre, data_post, data_spks_pre, data_spks_post, n
 
 
     # Split data into training and testing sets:
+    if test_on == 'pre':
+        bin_numbers_use = bin_numbers_pre
+    elif test_on == 'post':
+        bin_numbers_use = bin_numbers_post
+    else:
+        print('Invalid test_on value. Must be "pre" or "post".')
+        return None, None, None
+
     err_kfold = np.zeros(kCV)
-    predicted_position = np.zeros((len(bin_numbers_pre), 2))
+    predicted_position = np.zeros((len(bin_numbers_use), 2))
 
     # 10-fold cross-validation
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         future_to_fold = {
-            executor.submit(process_fold_floorflip, kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, [], kCV, train_on, test_on): kk
+            executor.submit(process_fold_floorflip, kk, data_pre, data_post, data_spks_pre, data_spks_post, bin_numbers_pre, bin_numbers_post, n_squares, boundaries, [], kCV, train_on, test_on, rotate): kk
             for kk in range(kCV)
         }
 
@@ -764,3 +827,5 @@ def decoding_err_multithreadCV(data_pos, data_spks, n_squares, boundaries, kCV=1
         str(np.mean(err_kfold)) + ' +/- ' + str(np.std(err_kfold)))
 
     return err_kfold, entropy, predicted_position
+
+
